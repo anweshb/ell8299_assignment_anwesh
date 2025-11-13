@@ -104,10 +104,12 @@ def generate(input_prompt: str,
 
         if reference_text:
 
+            reference_text = ' '.join(reference_text).lower()
+
             reference_tokens = [spacy_tokenize(reference_text.lower())]
             references = [reference_tokens]
 
-            bleu = bleu_score([generated_tokens], references).item()
+            bleu = bleu_score([generated_tokens], references)
         
         else: 
             bleu = None
