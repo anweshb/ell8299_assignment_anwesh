@@ -25,7 +25,6 @@ def set_seed(seed = 5758):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-set_seed()
 
 cache_location = '/home/anwesh/scratch/hf_cache/'
 dataset = load_dataset('roneneldan/TinyStories', cache_dir=cache_location)
@@ -57,7 +56,6 @@ tokenized_valid = tokenized_full.select(range(train_size, train_size + valid_siz
 
 tiny_stories_vocab = torch.load("/home/anwesh/scratch/ELL8299 Project/tiny_stories_vocab.pt")
 tiny_stories_vocab.set_default_index(tiny_stories_vocab['<pad>'])
-
 fasttext_vectors = FastText(language='en', cache='/home/anwesh/scratch/ELL8299 Project/vector_cache')
 
 VOCAB_SIZE = len(tiny_stories_vocab)        
@@ -447,12 +445,15 @@ def collate_fn(batch: List[Dict], vocab: vocab, seq_len: int) -> Dict[str, torch
     }
 
 def create_dataloaders(train_dataset, valid_dataset, vocab, seq_len, batch_size):
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=lambda batch: collate_fn(batch, vocab, seq_len)
-    )
+
+    if train_dataset is not None:
+
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=lambda batch: collate_fn(batch, vocab, seq_len)
+        )
 
     valid_dataloader = DataLoader(
         valid_dataset,
@@ -795,9 +796,11 @@ def main():
     parser.add_argument('--num_epochs', type=int, default=1000, help='Number of training epochs')
     parser.add_argument('--wandb_project', type=str, default='decoder-transformer', help='WandB project name')
     parser.add_argument('--device', type=str, default='cuda:1', help='Device to use for training (e.g., cuda:0, cuda:1, cpu)')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training and evaluation')
+    parser.add_argument('--batch_size', type=int, default=400, help='Batch size for training and evaluation')
 
     args = parser.parse_args()
+
+    set_seed()
 
     # cache_location = '/home/anwesh/scratch/hf_cache/'
     # dataset = load_dataset('roneneldan/TinyStories', cache_dir=cache_location)
@@ -807,9 +810,8 @@ def main():
     # full_dataset = concatenate_datasets([dataset['train'], dataset['validation']])
 
     wandb_run_id = None
-
     run_name = f"seq{args.seq_len}_layers{args.num_layers}_heads{args.num_heads}_lr{args.lr}_wd{args.weight_decay}"
-    checkpoint_path = f"/home/anwesh/scratch/ELL8299 Project/model_ckpts/{run_name}/best_model.pt"
+    checkpoint_path = f"/home/anwesh/scratch/ELL8299 Project/final_run_ckpts/{run_name}/best_model.pt"
     wandb_dir = "/home/anwesh/scratch/ELL8299 Project/wandb"
 
     if os.path.exists(checkpoint_path):
@@ -827,7 +829,7 @@ def main():
     if wandb_run_id:
         wandb.init(project=args.wandb_project,
                    id = wandb_run_id,
-                   resume="must",
+                   resume="allow",
                    name = run_name,
                    config=config,
                    dir = wandb_dir)
@@ -862,7 +864,6 @@ def main():
         train_loader, 
         valid_loader, 
         decoder_transformer=decoder_model, 
-        max_seq_len=seq_len,
         lr=args.lr,
         weight_decay=args.weight_decay,
         num_epochs=args.num_epochs)

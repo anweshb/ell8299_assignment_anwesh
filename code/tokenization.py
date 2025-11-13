@@ -20,7 +20,7 @@ def set_seed(seed = 5758):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-set_seed()
+
 
 # load spaCy model once
 _spacy_model = spacy.load('en_core_web_sm', disable=['parser', 'ner', 'textcat'])
@@ -36,6 +36,8 @@ def batch_spacy_tokenize(batch):
 
 
 if __name__ == "__main__":
+    
+    set_seed()
     print("Starting tokenization and vocabulary building...")
 
     cache_location = '/home/anwesh/scratch/hf_cache/'

@@ -2,10 +2,11 @@
 
 # Grid search parameters
 sequence_lengths=(128)
-num_layers=(3)
+num_layers=(6)
 num_heads=(8 16)
 learning_rates=(0.0003)
 weight_decays=(0.00)
+batch_size=(256)
 
 # Create log directory
 log_dir="/home/anwesh/scratch/ELL8299 Project/logs"
@@ -13,16 +14,22 @@ mkdir -p "$log_dir"
 
 # Get current timestamp for run identification
 timestamp=$(date +%Y%m%d_%H%M%S)
-
+DEVICE="cuda:0"
 # Check if CUDA device 1 is available
 # if ! nvidia-smi -L | grep -q "GPU 1:"; then
 #     echo "Error: CUDA device 1 is not available"
 #     exit 1
 # fi
 
+
+# "seq64_l3_h8_lr0.0003_wd0.0"
+# "seq64_l3_h16_lr0.0003_wd0.0"
+# "seq64_l3_h8_lr0.0003_wd0.01"
+
+
 skip_configs=(
 
-    # "seq64_l3_h8_lr0.0003_wd0.00_high_patience"
+    "seq64_l3_h8_lr0.0003_wd0.00_high_patience"
     # You can add more configurations here, e.g.:
     # "seq128_l6_h16_lr0.0003_wd0.01"
 )
@@ -67,14 +74,15 @@ for seq_len in "${sequence_lengths[@]}"; do
                     
                     # Run with unbuffered output and use script to capture terminal output
                     script -q -c "python -u ./train.py \
-                        --seq_len $seq_len \
-                        --num_layers $layers \
-                        --num_heads $heads \
-                        --lr $lr \
-                        --weight_decay $wd_raw \
-                        --num_epochs 100 \
-                        --wandb_project decoder-transformer-multiple_models" "$log_file"
-                    
+                    --seq_len $seq_len \
+                    --num_layers $layers \
+                    --num_heads $heads \
+                    --lr $lr \
+                    --weight_decay $wd_raw \
+                    --num_epochs 100 \
+                    --wandb_project decoder-transformer-multiple_models \
+                    --device $DEVICE \
+                    --batch_size $batch_size" "$log_file"
                     # Optional: add a small delay between runs
                     sleep 5
                 done
