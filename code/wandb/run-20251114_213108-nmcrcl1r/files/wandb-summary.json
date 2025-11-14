@@ -1,1 +1,0 @@
-{"_wandb":{"runtime":533},"_runtime":533,"val_perplexity":6.242603674169554,"peak_gpu_memory_mb":5265.98583984375,"epoch":10,"val_loss":1.8313973508303678,"_step":9,"_timestamp":1.7631366032250233e+09,"train_loss":1.7456074969847795,"epoch_duration_sec":50.47625780105591,"train_perplexity":5.729381000096133}

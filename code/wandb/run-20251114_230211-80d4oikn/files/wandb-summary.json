@@ -1,1 +1,0 @@
-{"_timestamp":1.7631420699245152e+09,"epoch":10,"train_perplexity":5.72538754430858,"val_loss":1.831064618086513,"_step":9,"train_loss":1.7449102404782229,"_runtime":537,"val_perplexity":6.24052690104462,"_wandb":{"runtime":537},"peak_gpu_memory_mb":5264.94775390625,"epoch_duration_sec":50.899025440216064}
