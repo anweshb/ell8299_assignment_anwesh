@@ -145,7 +145,7 @@ def generate(input_prompt: str,
              visualize_attn: bool = True,
              attn_output_dir: str = '/home/anwesh/ELL8299 Project/attn_heatmaps/',
              sample_tag = 'sample',
-             use_cache = True) -> dict:
+             use_cache = False) -> dict:
 
     
     prompt_tensor = prepare_prompt(input_prompt, max_length, vocab)
@@ -261,7 +261,7 @@ def generate_from_tinystories(args, model, params, num_samples = 5,
                               tokenized_validation = tokenized_valid, 
                               beam_search: bool = False, beam_size : int = 10,
                               attn_output_dir: str = '/home/anwesh/ELL8299 Project/attn_heatmaps/',
-                              kv_cache_use = True):
+                              kv_cache_use = False):
    
    ##Throw error if kv_cache_use and beam_search both true
    if kv_cache_use and beam_search:
@@ -629,7 +629,7 @@ def main():
                         help='Use stochastic sampling if set; otherwise use greedy decoding.')
     parser.add_argument('--device', type=str, default='cuda:1' if torch.cuda.is_available() else 'cpu',
                         help='Device to run the model on.') 
-    parser.add_argument('--kv_cache', default = True, type = bool)
+    parser.add_argument('--kv_cache', default = False, type = bool)
 
     args = parser.parse_args()
     
@@ -665,10 +665,11 @@ def main():
 
         bleu = None
 
-        generated_text, _, _ = generate(input_prompt = args.input_prompt, model = model, device = args.device, 
+        generated_text, _, _ = generate(input_prompt = user_input_prompt, model = model, device = args.device, 
                                                           vocab = tiny_stories_vocab, max_output_length = args.max_output_length, 
                                                           max_length = params['seq_len'], temperature = args.temperature,
-                                                          top_k = args.top_k, stochastic = args.stochastic)
+                                                          top_k = args.top_k, stochastic = args.stochastic,
+                                                          use_cache=args.kv_cache)
 
         print("Generated Text:\n", generated_text)
         
@@ -677,7 +678,7 @@ def main():
 
         (trimmed_prompts, generated_texts), perplexity_list, bleu_list, avg_time_per_token = generate_from_tinystories(args, model, params, 
                                                                                                                        tokenized_validation = tokenized_valid, 
-                                                                                                                       beam_search = False, attn_output_dir = None)
+                                                                                                                       beam_search = True, attn_output_dir = None)
 
 
         for items in zip(trimmed_prompts, generated_texts, perplexity_list, bleu_list, avg_time_per_token):

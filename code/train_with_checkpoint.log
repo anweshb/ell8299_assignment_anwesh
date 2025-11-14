@@ -1,0 +1,89 @@
+Tokenized dataset loaded from disk.
+Checkpointing Experiment Configuration:
+============================================================
+seq_len: 64
+num_layers: 6
+num_heads: 8
+lr: 0.0003
+weight_decay: 0
+num_epochs: 10
+batch_size: 128
+subset_size: 100000
+device: cuda:1
+============================================================
+
+Creating dataset subsets...
+Train subset size: 100000
+Validation subset size: 10000
+
+============================================================
+EXPERIMENT 1: Training WITH Gradient Checkpointing
+============================================================
+Starting training with *manual gradient checkpointing*.
+Epoch 1/10 - Train Loss: 3.3580 | Val Loss: 5.1872
+Epoch Duration: 40.44s | Peak GPU Memory: 4873.05 MB
+Epoch 2/10 - Train Loss: 5.3933 | Val Loss: 5.9622
+Epoch Duration: 40.19s | Peak GPU Memory: 4873.29 MB
+Epoch 3/10 - Train Loss: 5.7290 | Val Loss: 5.6550
+Epoch Duration: 40.14s | Peak GPU Memory: 4873.29 MB
+Epoch 4/10 - Train Loss: 5.5420 | Val Loss: 5.5741
+Epoch Duration: 40.11s | Peak GPU Memory: 4873.29 MB
+Epoch 5/10 - Train Loss: 5.5339 | Val Loss: 5.5382
+Epoch Duration: 40.16s | Peak GPU Memory: 4873.29 MB
+Epoch 6/10 - Train Loss: 5.5648 | Val Loss: 5.9030
+Epoch Duration: 40.19s | Peak GPU Memory: 4873.29 MB
+Epoch 7/10 - Train Loss: 6.0758 | Val Loss: 7.1428
+Epoch Duration: 40.21s | Peak GPU Memory: 4873.29 MB
+Epoch 8/10 - Train Loss: 6.0283 | Val Loss: 5.5482
+Epoch Duration: 40.18s | Peak GPU Memory: 4873.29 MB
+Epoch 9/10 - Train Loss: 5.5381 | Val Loss: 5.4988
+Epoch Duration: 40.21s | Peak GPU Memory: 4873.29 MB
+Epoch 10/10 - Train Loss: 5.5444 | Val Loss: 5.5393
+Epoch Duration: 40.29s | Peak GPU Memory: 4873.29 MB
+Training finished.'
+
+
+
+
+
+
+Avg epoch time: 40.21s 
+
+
+
+
+
+============================================================
+EXPERIMENT 2: Training WITHOUT Gradient Checkpointing
+============================================================
+Starting standard training (no checkpointing).
+Epoch 1/10 - Train Loss: 3.2588 | Val Loss: 2.4860
+Epoch Duration: 50.74s | Peak GPU Memory: 5264.95 MB
+Epoch 2/10 - Train Loss: 2.3571 | Val Loss: 2.2007
+Epoch Duration: 50.80s | Peak GPU Memory: 5264.95 MB
+Epoch 3/10 - Train Loss: 2.1468 | Val Loss: 2.0684
+Epoch Duration: 50.83s | Peak GPU Memory: 5264.95 MB
+Epoch 4/10 - Train Loss: 2.0270 | Val Loss: 1.9908
+Epoch Duration: 51.08s | Peak GPU Memory: 5264.95 MB
+Epoch 5/10 - Train Loss: 1.9471 | Val Loss: 1.9425
+Epoch Duration: 50.87s | Peak GPU Memory: 5264.95 MB
+Epoch 6/10 - Train Loss: 1.8875 | Val Loss: 1.9046
+Epoch Duration: 50.87s | Peak GPU Memory: 5264.95 MB
+Epoch 7/10 - Train Loss: 1.8416 | Val Loss: 1.8754
+Epoch Duration: 50.83s | Peak GPU Memory: 5264.95 MB
+Epoch 8/10 - Train Loss: 1.8035 | Val Loss: 1.8586
+Epoch Duration: 50.85s | Peak GPU Memory: 5264.95 MB
+Epoch 9/10 - Train Loss: 1.7719 | Val Loss: 1.8415
+Epoch Duration: 50.89s | Peak GPU Memory: 5264.95 MB
+Epoch 10/10 - Train Loss: 1.7449 | Val Loss: 1.8311
+Epoch Duration: 50.90s | Peak GPU Memory: 5264.95 MB
+
+============================================================
+COMPARISON RESULTS
+============================================================
+
+Without Checkpointing:
+  Peak Memory: 5264.95 MB
+  Avg Epoch Time: 50.87 s
+
+With Checkpointing:

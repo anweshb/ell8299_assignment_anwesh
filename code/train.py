@@ -673,6 +673,9 @@ def train_with_checkpointing(train_loader, validation_loader, decoder_transforme
     model = decoder_transformer # Use a shorter alias
 
     print(f"Starting training with *manual gradient checkpointing*.")
+    
+    epoch_times = []
+    peak_memory_mb = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -712,14 +715,17 @@ def train_with_checkpointing(train_loader, validation_loader, decoder_transforme
             # We store the detached inputs to each layer in `block_inputs`
             # so we can re-compute the forward pass during the backward pass
 
-            for layer in model.layers:
+            for i, layer in enumerate(model.layers):
                 # Detach the input, making it a leaf node for this tiny graph
                 detached_x = detached_x.detach().requires_grad_()
                 block_inputs.append(detached_x) # Store the detached input
                 
                 # Run the layer. Grads only flow back to `detached_x`
                 detached_x, _ = layer(detached_x, mask=None, past_layer_cache=None)
+
+            detached_x.retain_grad()
             
+
             # final Layers (Run with graph)
             # The graph from `detached_x` (last layer's output) to the loss is kept.
             x_final = model.layer_norm(detached_x)
@@ -728,16 +734,14 @@ def train_with_checkpointing(train_loader, validation_loader, decoder_transforme
             loss = criterion(output_flat, target_flat)
             total_train_loss += loss.item()
 
-            # --- MANUAL CHECKPOINTING BACKWARD PASS ---
-            
+                        
             # backward on final layers
             # to compute grad for output_linear, layer_norm,
             # and populates `detached_x.grad` (the output of the last block)
             loss.backward()
-            
-            # Get the gradient from the final output
+
             current_grad = detached_x.grad.clone()
-            
+        
             # loop backwards through layers
             for i in range(len(model.layers) - 1, -1, -1):
                 
@@ -754,11 +758,16 @@ def train_with_checkpointing(train_loader, validation_loader, decoder_transforme
                 # This populates grads for model.layers[i] parameters
                 # and, crucially, populates `x_in_real.grad`
                 x_out_recon.backward(current_grad)
+
+                if x_in_real.grad is not None:
+                    current_grad = x_in_real.grad.clone()
+                else:
+                    break
                 
                 # Get the gradient that just flowed to this block's input
                 # and use it for the *next* iteration (the block before this one)
-                current_grad = x_in_real.grad.clone()
-
+                
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             # After the loop, `block_inputs[0].grad` (which is `x.grad`)
             # is populated. Gradients will now flow from `x` back
             # through the embedding/positional layers automatically.
@@ -770,7 +779,10 @@ def train_with_checkpointing(train_loader, validation_loader, decoder_transforme
         
         # --- 3. Logging ---
         epoch_duration = epoch_end_time - epoch_start_time
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+        epoch_times.append(epoch_duration)
+
+        current_peak = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+        peak_memory_mb = max(peak_memory_mb, current_peak)
         
         avg_train_loss = total_train_loss / len(train_loader)
         train_perplexity = float(np.exp(avg_train_loss))
@@ -805,7 +817,9 @@ def train_with_checkpointing(train_loader, validation_loader, decoder_transforme
             'peak_gpu_memory_mb': peak_memory_mb
         })
 
-    print("Training finished.")
+    print("Training finished.'\n\n\n\n\n\n")
+
+    print("Avg epoch time: {:.2f}s".format(np.mean(epoch_times)), '\n\n\n\n')
 
 
 def main():
