@@ -257,7 +257,7 @@ def generate(input_prompt: str,
     return generated_text, mean_perplexity, bleu
 
 
-def generate_from_tinystories(args, model, params, num_samples = 5, 
+def generate_from_tinystories(args, model, params, num_samples = 1, 
                               tokenized_validation = tokenized_valid, 
                               beam_search: bool = False, beam_size : int = 10,
                               attn_output_dir: str = '/home/anwesh/ELL8299 Project/attn_heatmaps/',
@@ -678,7 +678,8 @@ def main():
 
         (trimmed_prompts, generated_texts), perplexity_list, bleu_list, avg_time_per_token = generate_from_tinystories(args, model, params, 
                                                                                                                        tokenized_validation = tokenized_valid, 
-                                                                                                                       beam_search = True, attn_output_dir = None)
+                                                                                                                       beam_search = False, attn_output_dir = None,
+                                                                                                                       kv_cache_use=args.kv_cache)
 
 
         for items in zip(trimmed_prompts, generated_texts, perplexity_list, bleu_list, avg_time_per_token):

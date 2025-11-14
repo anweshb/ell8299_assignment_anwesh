@@ -25,7 +25,7 @@ def grad_accm_experiments():
         print(f"{key}: {value}")
     
 
-    run_name = f"GRADACCM_seq{config['seq_len']}_layers{config['num_layers']}_heads{config['num_heads']}_lr{config['lr']}_wd{config['weight_decay']}"
+    run_name = f"GRADACCM_{config['accumulation_steps']}_seq{config['seq_len']}_layers{config['num_layers']}_heads{config['num_heads']}_lr{config['lr']}_wd{config['weight_decay']}"
     wandb_dir = "/home/anwesh/scratch/ELL8299 Project/wandb"
     wandb_run_id = None
 

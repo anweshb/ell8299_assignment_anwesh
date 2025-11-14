@@ -836,7 +836,7 @@ def main():
 
     args = parser.parse_args()
 
-    set_seed()
+    # set_seed()
 
     # cache_location = '/home/anwesh/scratch/hf_cache/'
     # dataset = load_dataset('roneneldan/TinyStories', cache_dir=cache_location)
