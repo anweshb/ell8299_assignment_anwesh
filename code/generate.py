@@ -107,6 +107,34 @@ def _save_attention_heatmaps(attn_list, tokens, out_dir, tag="sample"):
         plt.close()
 
 
+def _sample_next_token(logits, temperature=0.5, top_k=0, stochastic=True):
+    """
+    Takes logits (shape [1, vocab_size]) and returns a sampled token id
+    and its log probability.
+    """
+    if temperature > 0:
+        logits = logits / temperature
+
+    if top_k > 0:
+        values, indices = torch.topk(logits, top_k, dim=-1)
+        kth = values[:, -1].unsqueeze(-1)
+        mask = logits < kth
+        logits = logits.masked_fill(mask, -float('Inf'))
+
+    # Use log_softmax for numerical stability in probs
+    probs = torch.softmax(logits, dim=-1)
+    log_probs = torch.log_softmax(logits, dim=-1)
+
+    if stochastic:
+        next_id = int(torch.multinomial(probs, num_samples=1).item())
+    else:
+        next_id = int(torch.argmax(probs, dim=-1).item())
+    
+    token_log_prob = log_probs[0, next_id].item()
+    
+    return next_id, token_log_prob
+
+
 def generate(input_prompt: str,
              device: str,
              model, vocab, max_length,
@@ -116,86 +144,130 @@ def generate(input_prompt: str,
              reference_text = None,
              visualize_attn: bool = True,
              attn_output_dir: str = '/home/anwesh/ELL8299 Project/attn_heatmaps/',
-             sample_tag = 'sample') -> dict:
+             sample_tag = 'sample',
+             use_cache = True) -> dict:
+
     
-    input_tensor = prepare_prompt(input_prompt, max_length, vocab)
-    input_tensor = input_tensor.to(torch.device(device))
+    prompt_tensor = prepare_prompt(input_prompt, max_length, vocab)
+    prompt_tensor = prompt_tensor.to(torch.device(device))
 
     model.to(device)
     model.eval()
 
     generated_tokens = []
     token_log_probs = []
+    past_kv_cache = None
 
     with torch.no_grad():
-        
-        for _ in range(max_output_length):
 
-            if input_tensor.size(1) >= model.positional_encoding.pe.size(1):
-                #if input length exceeds model's max positional encoding length, break
-                break
-
-            #get model predictions    
-            logits = model(input_tensor)        # (1, seq_len, vocab_size)
-            next_token_logits = logits[:, -1, :] / (temperature)  # (1, vocab_size)
-
-            if top_k:
-                values, indices = torch.topk(next_token_logits, top_k, dim=-1)
-                kth = values[:, -1].unsqueeze(-1)
-                mask = next_token_logits < kth
-                next_token_logits = next_token_logits.masked_fill(mask, -float('Inf'))
+        if use_cache:
             
-            probs = torch.softmax(next_token_logits, dim=-1)  # (1, vocab_size)
-
-            if stochastic:
-                next_id = int(torch.multinomial(probs, num_samples=1).item())
-            else:
-                next_id = int(torch.argmax(probs, dim=-1).item())
+            #process the prompt to initialize the cache
+            logits, past_kv_cache = model(prompt_tensor, past_kv_cache=None)
+            next_token_logits = logits[:, -1, :] 
             
-            if next_id == vocab['<eos>']:
-                break
+            #sample first token
+            next_id, log_prob = _sample_next_token(next_token_logits, temperature, top_k, stochastic)
+
+            #new input is single new token
+            input_tensor = torch.tensor([[next_id]], device=torch.device(device))  # (1, 1) shape
 
             generated_tokens.append(vocab.get_itos()[next_id])
-            next_tensor = torch.tensor([[next_id]], device=torch.device(device)) #  -> (1, 1) shape
-            input_tensor = torch.cat([input_tensor, next_tensor], dim=1)  # Append to input
+            token_log_probs.append(log_prob)
 
-            token_prob = probs[0, next_id].item()
-            token_log_prob = torch.log(probs[0, next_id]).item()
-            token_log_probs.append(token_log_prob)
+            for _ in range(max_output_length - 1):
+                current_seq_len = past_kv_cache[0][0].size(2)  # Get current sequence length from cache
 
+                if current_seq_len + 1 >= model.positional_encoding.pe.size(1):
+                    # if input length exceeds model's max positional encoding length, break
+                    break   
+            
+
+                logits, past_kv_cache = model(input_tensor, mask = None, past_kv_cache=past_kv_cache)        # (1, seq_len, vocab_size)
+                
+                ###CHECK HERE
+                next_token_logits = logits.squeeze(0)  # (vocab_size)
+
+                next_id, log_prob = _sample_next_token(next_token_logits, temperature, top_k, stochastic)
+                
+                if next_id == vocab['<eos>']:
+                    break
+
+                generated_tokens.append(vocab.get_itos()[next_id])
+                token_log_probs.append(log_prob)
+                input_tensor = torch.tensor([[next_id]], device=torch.device(device))  # (1, 1) shape
+
+            final_tensor = torch.cat([prompt_tensor] + [torch.tensor([[vocab[t] for t in generated_tokens if t in vocab]] ,device=device)], dim=1)
+
+        else:    
+            
+            input_tensor = prompt_tensor  # (1, seq_len)
+        
+            for _ in range(max_output_length):
+                if input_tensor.size(1) >= model.positional_encoding.pe.size(1):
+                    break
+            
+
+                logits, _ = model(input_tensor, mask = None, past_kv_cache = None)        # (1, seq_len, vocab_size
+                
+                next_token_logits = logits[:, -1, :]  # (1, vocab_size
+                
+                next_id, log_prob = _sample_next_token(next_token_logits, temperature, top_k, stochastic)
+
+                if next_id == vocab['<eos>']:
+                    break
+
+                generated_tokens.append(vocab.get_itos()[next_id])
+                token_log_probs.append(log_prob)
+
+                next_tensor = torch.tensor([[next_id]], device=torch.device(device)) #  -> (1, 1) shape
+                input_tensor = torch.cat([input_tensor, next_tensor], dim=1)  #
+
+            final_tensor = input_tensor
+
+
+    mean_perplexity = None
     if len(token_log_probs) > 0:
-
         perplexity_per_token = [math.exp(-log_prob) for log_prob in token_log_probs]
         mean_perplexity = sum(perplexity_per_token)/len(perplexity_per_token)
-
-        if reference_text:
-
-            reference_text = ' '.join(reference_text).lower()
-
-            reference_tokens = [spacy_tokenize(reference_text.lower())]
-            references = [reference_tokens]
-
-            bleu = bleu_score([generated_tokens], references)
+    
+    bleu = None
+    if reference_text:
         
-        else: 
-            bleu = None
+        reference_text = ' '.join(reference_text).lower()
+
+        reference_tokens = [spacy_tokenize(reference_text.lower())]
+        references = [reference_tokens]
+
+        bleu = bleu_score([generated_tokens], references)
 
     if visualize_attn:
-        _ = model(input_tensor)
+        with torch.no_grad():
+            _ = model(final_tensor, mask=None, past_kv_cache=None) 
+        
         itos = vocab.get_itos()
-        token_ids = input_tensor[0].tolist()
+        token_ids = final_tensor[0].tolist()
         tokens = [itos[token_id] for token_id in token_ids]
         attn_list = _collect_layer_attn(model)
 
-        if(len(attn_list) > 0):
-            # print("ABOUT TO CALL SAVE ATTENTION HEATMAPS FUNCTION...")
+        if(len(attn_list) > 0 and (attn_output_dir is not None)):
             _save_attention_heatmaps(attn_list, tokens, attn_output_dir, tag=sample_tag)
 
     generated_text = ' '.join(generated_tokens)
     return generated_text, mean_perplexity, bleu
 
 
-def generate_from_tinystories(args, model, params, num_samples = 5, tokenized_validation = tokenized_valid, beam_search: bool = False, beam_size : int = 10):
+def generate_from_tinystories(args, model, params, num_samples = 5, 
+                              tokenized_validation = tokenized_valid, 
+                              beam_search: bool = False, beam_size : int = 10,
+                              attn_output_dir: str = '/home/anwesh/ELL8299 Project/attn_heatmaps/',
+                              kv_cache_use = True):
+   
+   ##Throw error if kv_cache_use and beam_search both true
+   if kv_cache_use and beam_search:
+       raise ValueError("KV Cache cannot be used with Beam Search. Please set kv_cache_use to False when using Beam Search.")
+
+   print("KV Cache use is set to : ", kv_cache_use, '\n\n')
    
     
    #Sample a random examples from validation set
@@ -221,30 +293,33 @@ def generate_from_tinystories(args, model, params, num_samples = 5, tokenized_va
                                                                 max_length = params['seq_len'], beam_size = beam_size,
                                                                 length_penalty = 0.8, reference_text = ground_truth)
             end_time = time.time()
+        
 
 
         else:
-            
-            start_time = time.time()
-            generated_text, perplexity_per_token , bleu = generate(input_prompt= prompt_text, model = model, device = args.device, 
-                                                                vocab = tiny_stories_vocab, max_output_length = args.max_output_length, 
-                                                                max_length = params['seq_len'], temperature = args.temperature,
-                                                                top_k = args.top_k, stochastic = args.stochastic, reference_text = ground_truth)
-            end_time = time.time()
 
-        avg_time_per_token.append((end_time - start_time)/len(generated_text.split()))
-            
-        generated_completions.append(generated_text.split())
+            start_time = time.time()
+
+            generated_text, perplexity_per_token, bleu = generate(input_prompt = prompt_text, model = model, device = args.device, 
+                                                              vocab = tiny_stories_vocab, max_output_length = args.max_output_length, 
+                                                              max_length = params['seq_len'], temperature = args.temperature,
+                                                              top_k = args.top_k, stochastic = args.stochastic,
+                                                              reference_text = ground_truth, attn_output_dir=attn_output_dir,
+                                                              use_cache=kv_cache_use)
+
+        end_time = time.time()
+        avg_time_per_token.append((end_time - start_time)/len(spacy_tokenize(generated_text)))
         perplexity_per_token_list.append(perplexity_per_token)
         bleu_list.append(bleu)
-    
+        generated_completions.append(spacy_tokenize(generated_text))
+        
 
    mean_perplexity = sum(perplexity_per_token_list)/len(perplexity_per_token_list)
    mean_bleu = sum(bleu_list)/len(bleu_list)
    mean_time_per_token = sum(avg_time_per_token)/len(avg_time_per_token)
 
    print("Average Perplexity per token on samples from TinyStories validation set: ", mean_perplexity)
-   print("Average BLEU score on 1 samples from TinyStories validation set: ", mean_bleu)
+   print(f"Average BLEU score on {num_samples} samples from TinyStories validation set: ", mean_bleu)
    
    if beam_search:
         print(f"Average time taken per token with Beam Search (k = {beam_size}): ", mean_time_per_token)
@@ -271,9 +346,11 @@ def path_to_params(checkpoint_path: str):
 
 
 class BeamSearchHelper:
-    def __init__(self, tensor, score):
-        self.tensor = tensor
-        self.score = score
+    """Helper class to store beam search hypotheses."""
+    def __init__(self, tensor, score, cache):
+        self.tensor = tensor  # full sequence of token IDs
+        self.score = score    # cumulative log-prob
+        self.cache = cache    # past_kv_cache for this beam
 
 
 def beam_search_generate(input_prompt: str,
@@ -284,41 +361,64 @@ def beam_search_generate(input_prompt: str,
                          length_penalty: float = 1.0, 
                          reference_text = None) -> dict:
     
-    
-    input_tensor = prepare_prompt(input_prompt, max_length, vocab)
-    input_tensor = input_tensor.to(torch.device(device))
+    prompt_tensor = prepare_prompt(input_prompt, max_length, vocab)
+    prompt_tensor = prompt_tensor.to(torch.device(device))
+    prompt_length = prompt_tensor.size(1)
 
     model.to(device)
     model.eval()
-
     eos_id = vocab['<eos>']
-    init_beams = BeamSearchHelper(input_tensor, 0.0)  # Initialize beams
-    active_beams = [init_beams]
-    completed_beams = []
 
     with torch.no_grad():
+        #priming the cache with the prompt
+        logits, past_kv_cache = model(prompt_tensor, past_kv_cache=None)
+        next_token_log_probs = torch.log_softmax(logits[:, -1, :], dim=-1)
+        
+        top_log_probs, top_indices = torch.topk(next_token_log_probs, beam_size, dim=-1)
 
-        for _ in range(max_output_length):
+        active_beams = []
+        completed_beams = []
 
-            if input_tensor.size(1) >= model.positional_encoding.pe.size(1):
-                #if input length exceeds model's max positional encoding length, break
-                break
+        for i in range(beam_size):
+            next_token_id = int(top_indices[0, i].item())
+            log_prob = float(top_log_probs[0, i].item())
+            
+            # This tensor now stores the *full* sequence
+            new_tensor = torch.cat([prompt_tensor, torch.tensor([[next_token_id]], device=device)], dim=1)
+            
+            if next_token_id == eos_id:
+                completed_beams.append(BeamSearchHelper(new_tensor, log_prob, past_kv_cache))
+            else:
+                active_beams.append(BeamSearchHelper(new_tensor, log_prob, past_kv_cache))
 
+
+        # generation loop
+
+        for _ in range(max_output_length - 1):
             if not active_beams:
-                break  # All beams have completed
+                break
             
             all_candidates = []
+            new_cache_map = {} # This will store the *new* caches
 
-            for beam in active_beams:
-                if beam.tensor.size(1) >= model.positional_encoding.pe.size(1):
+            for beam_idx, beam in enumerate(active_beams):
+                
+                # Check total length
+                current_seq_len = beam.tensor.size(1)
+                if current_seq_len >= model.positional_encoding.pe.size(1):
                     completed_beams.append(beam)
                     continue
-
-                    
-                logits = model(beam.tensor)        # (1, seq_len, vocab_size)
                 
-                next_token_log_probs = torch.log_softmax(logits[:, -1, :], dim=-1)  # (1, vocab_size)
+                #last token to feed into the model
+                input_tensor = beam.tensor[:, -1].unsqueeze(0) # Shape [1, 1]
+                
+                # ruun model with this beam and cache
+                logits, new_cache = model(input_tensor, past_kv_cache=beam.cache)
+                
+                # Store the new cache
+                new_cache_map[beam_idx] = new_cache
 
+                next_token_log_probs = torch.log_softmax(logits.squeeze(0), dim=-1)
                 top_log_probs, top_indices = torch.topk(next_token_log_probs, beam_size, dim=-1)
 
                 for i in range(beam_size):
@@ -326,62 +426,184 @@ def beam_search_generate(input_prompt: str,
                     next_log_prob = float(top_log_probs[0, i].item())
 
                     new_score = beam.score + next_log_prob
-                    new_tensor = torch.cat([beam.tensor, torch.tensor([[next_token_id]], device=torch.device(device))], dim=1)
+                    new_tensor = torch.cat([beam.tensor, torch.tensor([[next_token_id]], device=device)], dim=1)
+                    
+                    # Temporarily store the parent beam's index in the cache field
+                    temp_beam = BeamSearchHelper(new_tensor, new_score, beam_idx)
 
                     if next_token_id == eos_id:
-                        completed_beams.append(BeamSearchHelper(new_tensor, new_score))
+                        completed_beams.append(temp_beam)
                     else:
-                        all_candidates.append(BeamSearchHelper(new_tensor, new_score))
+                        all_candidates.append(temp_beam)
             
-
-            if all_candidates:
-                all_candidates.sort(key=lambda x: x.score / (x.tensor.size(1) ** length_penalty), reverse=True)
-                active_beams = all_candidates[:beam_size]
-            else:
+            # --- 3. Prune and Re-order Caches ---
+            if not all_candidates:
                 active_beams = []
+                continue
+
+            all_candidates.sort(key=lambda x: x.score / (x.tensor.size(1) ** length_penalty), reverse=True)
+            
+            next_active_beams = []
+            for candidate in all_candidates[:beam_size]:
+                # Get the parent beam's index
+                parent_idx = candidate.cache
+                # Get the *new* cache generated by that parent
+                actual_cache = new_cache_map[parent_idx]
+                # Create the final beam object for the next loop
+                candidate.cache = actual_cache
+                next_active_beams.append(candidate)
+            
+            active_beams = next_active_beams
                 
         completed_beams.extend(active_beams)
 
+    # --- 4. Find Best Beam ---
     if not completed_beams:
-        return "", float('inf'), 0.0  # No valid beams generated
+        return "", float('inf'), 0.0
     else:
         completed_beams.sort(key=lambda x: x.score / (x.tensor.size(1) ** length_penalty), reverse=True)
         best_beam = completed_beams[0]
     
-
-    prompt_length = input_tensor.size(1)
     all_token_ids = best_beam.tensor[0].tolist()
     generated_token_ids = all_token_ids[prompt_length:]
-
-
-    generated_tokens = [vocab.get_itos()[token_id] for token_id in generated_token_ids]
-    generated_text = ' '.join(generated_tokens)
-
-    mean_perplexity = None
-    num_generated = len(generated_token_ids)
     
+    # Filter out EOS tokens if they are in the middle
+    final_tokens = []
+    for token_id in generated_token_ids:
+        if token_id == eos_id:
+            break
+        final_tokens.append(vocab.get_itos()[token_id])
+    generated_text = ' '.join(final_tokens)
+
+    # --- 5. Post-processing ---
+    mean_perplexity = None
+    num_generated = len(final_tokens)
     if num_generated > 0:
-        log_probs = [best_beam.score / num_generated] * num_generated
-        perplexity_per_token = [math.exp(-log_prob) for log_prob in log_probs]
-        mean_perplexity = sum(perplexity_per_token)/len(perplexity_per_token)
+        # Use average log-prob for perplexity
+        avg_log_prob = best_beam.score / num_generated
+        mean_perplexity = math.exp(-avg_log_prob)
 
     bleu = None
     if reference_text:
-        
         reference_text = ' '.join(reference_text).lower()
-
         reference_tokens = [spacy_tokenize(reference_text.lower())]
         references = [reference_tokens]
+        bleu = bleu_score([final_tokens], references)
 
-        bleu = bleu_score([generated_tokens], references)
-
-    if tokenized_valid:
-        _ = model(input_tensor)
-        itos = vocab.get_itos()
-        token_ids = best_beam.tensor[0].tolist()
-        tokens = [itos[token_id] for token_id in token_ids]
-
+    # (Visualization logic removed for simplicity, as it requires another full pass)
+    
     return generated_text, mean_perplexity, bleu
+
+
+
+# def beam_search_generate(input_prompt: str,
+#                          device: str,
+#                          model, vocab, max_length,
+#                          beam_size: int = 5,
+#                          max_output_length: int = 100,
+#                          length_penalty: float = 1.0, 
+#                          reference_text = None) -> dict:
+    
+
+    
+    
+#     input_tensor = prepare_prompt(input_prompt, max_length, vocab)
+#     input_tensor = input_tensor.to(torch.device(device))
+
+#     model.to(device)
+#     model.eval()
+
+#     eos_id = vocab['<eos>']
+#     init_beams = BeamSearchHelper(input_tensor, 0.0)  # Initialize beams
+#     active_beams = [init_beams]
+#     completed_beams = []
+
+#     with torch.no_grad():
+
+#         for _ in range(max_output_length):
+
+#             if input_tensor.size(1) >= model.positional_encoding.pe.size(1):
+#                 #if input length exceeds model's max positional encoding length, break
+#                 break
+
+#             if not active_beams:
+#                 break  # All beams have completed
+            
+#             all_candidates = []
+
+#             for beam in active_beams:
+#                 if beam.tensor.size(1) >= model.positional_encoding.pe.size(1):
+#                     completed_beams.append(beam)
+#                     continue
+
+                    
+#                 logits = model(beam.tensor)        # (1, seq_len, vocab_size)
+                
+#                 next_token_log_probs = torch.log_softmax(logits[:, -1, :], dim=-1)  # (1, vocab_size)
+
+#                 top_log_probs, top_indices = torch.topk(next_token_log_probs, beam_size, dim=-1)
+
+#                 for i in range(beam_size):
+#                     next_token_id = int(top_indices[0, i].item())
+#                     next_log_prob = float(top_log_probs[0, i].item())
+
+#                     new_score = beam.score + next_log_prob
+#                     new_tensor = torch.cat([beam.tensor, torch.tensor([[next_token_id]], device=torch.device(device))], dim=1)
+
+#                     if next_token_id == eos_id:
+#                         completed_beams.append(BeamSearchHelper(new_tensor, new_score))
+#                     else:
+#                         all_candidates.append(BeamSearchHelper(new_tensor, new_score))
+            
+
+#             if all_candidates:
+#                 all_candidates.sort(key=lambda x: x.score / (x.tensor.size(1) ** length_penalty), reverse=True)
+#                 active_beams = all_candidates[:beam_size]
+#             else:
+#                 active_beams = []
+                
+#         completed_beams.extend(active_beams)
+
+#     if not completed_beams:
+#         return "", float('inf'), 0.0  # No valid beams generated
+#     else:
+#         completed_beams.sort(key=lambda x: x.score / (x.tensor.size(1) ** length_penalty), reverse=True)
+#         best_beam = completed_beams[0]
+    
+
+#     prompt_length = input_tensor.size(1)
+#     all_token_ids = best_beam.tensor[0].tolist()
+#     generated_token_ids = all_token_ids[prompt_length:]
+
+
+#     generated_tokens = [vocab.get_itos()[token_id] for token_id in generated_token_ids]
+#     generated_text = ' '.join(generated_tokens)
+
+#     mean_perplexity = None
+#     num_generated = len(generated_token_ids)
+    
+#     if num_generated > 0:
+#         log_probs = [best_beam.score / num_generated] * num_generated
+#         perplexity_per_token = [math.exp(-log_prob) for log_prob in log_probs]
+#         mean_perplexity = sum(perplexity_per_token)/len(perplexity_per_token)
+
+#     bleu = None
+#     if reference_text:
+        
+#         reference_text = ' '.join(reference_text).lower()
+
+#         reference_tokens = [spacy_tokenize(reference_text.lower())]
+#         references = [reference_tokens]
+
+#         bleu = bleu_score([generated_tokens], references)
+
+#     if tokenized_valid:
+#         _ = model(input_tensor)
+#         itos = vocab.get_itos()
+#         token_ids = best_beam.tensor[0].tolist()
+#         tokens = [itos[token_id] for token_id in token_ids]
+
+#     return generated_text, mean_perplexity, bleu
 
 
             
@@ -407,6 +629,8 @@ def main():
                         help='Use stochastic sampling if set; otherwise use greedy decoding.')
     parser.add_argument('--device', type=str, default='cuda:1' if torch.cuda.is_available() else 'cpu',
                         help='Device to run the model on.') 
+    parser.add_argument('--kv_cache', default = True, type = bool)
+
     args = parser.parse_args()
     
     print("INITING MODEL...")
@@ -451,7 +675,9 @@ def main():
     else:
         print("GENERATING TEXT FROM TINYSTORIES VALIDATION SET...")
 
-        (trimmed_prompts, generated_texts), perplexity_list, bleu_list, avg_time_per_token = generate_from_tinystories(args, model, params, tokenized_validation = tokenized_valid, beam_search = True)
+        (trimmed_prompts, generated_texts), perplexity_list, bleu_list, avg_time_per_token = generate_from_tinystories(args, model, params, 
+                                                                                                                       tokenized_validation = tokenized_valid, 
+                                                                                                                       beam_search = False, attn_output_dir = None)
 
 
         for items in zip(trimmed_prompts, generated_texts, perplexity_list, bleu_list, avg_time_per_token):
@@ -461,7 +687,7 @@ def main():
             bleu = items[3]
             avg_time_per_token = items[4]
 
-            print(f"Prompt: {prompt}\nGenerated Text: {generated}\nPerplexity per token: {perplexity}\nBLEU Score: {bleu}\nAvg time per token: {avg_time_per_token}\n\n") 
+            print(f"\nPrompt: {prompt}\nGenerated Text: {generated}\nPerplexity per token: {perplexity}\nBLEU Score: {bleu}\nAvg time per token: {avg_time_per_token}\n\n") 
 
 
     

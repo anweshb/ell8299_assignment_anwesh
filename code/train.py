@@ -16,7 +16,8 @@ from collections import OrderedDict
 from typing import List, Dict
 import argparse
 import wandb
-
+import time
+from model import *
 
 ##For reporducibility
 def set_seed(seed = 5758):
@@ -89,310 +90,6 @@ def create_embedding_layer(vocab_size = VOCAB_SIZE,
 
     return embedding_layer
 
-class PositionalEncoding(torch.nn.Module):
-
-    """
-    Implements the sinusoidal positional encoding as described in the "Attention is All You Need" paper.
-    This module adds positional information to the input embeddings to help the model understand the
-    order of tokens.
-    
-    Args:
-        d_model (int): The dimension of the embeddings.
-        max_length (int): The maximum length of the input sequences.
-    """
-
-    def __init__(self, d_model: int = 256, max_length : int = 64):
-        super(PositionalEncoding, self).__init__()
-        self.d_model = d_model
-
-        # position term
-        pos = torch.arange(0, max_length).unsqueeze(1)
-
-        ##10000^(2i/d_model)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
-
-        # init the positional encoding matrix
-        pe = torch.zeros(max_length, d_model)
-        
-        ##even terms in embedding dim
-        pe[:, 0::2] = torch.sin(pos * div_term)
-
-        ##odd terms in embedding dim
-        pe[:, 1::2] = torch.cos(pos * div_term)
-
-        pe = pe.unsqueeze(0)  # shape: (1, max_length, d_model)
-
-        ## Non trainable, so register as buffer
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len, d_model)
-
-        Returns:
-            Tensor of shape (batch_size, seq_len, d_model) with positional encodings added
-        """
-        x = x * torch.sqrt(torch.tensor(self.d_model, dtype=torch.float32))
-        seq_len = x.size(1)
-        x = x + self.pe[:, :seq_len, :]
-        return x
-
-class LayerNorm(torch.nn.Module):
-
-    """    
-    Implementation of Layer Normalization as described in the "Layer Normalization" paper.
-    
-    Args:
-        features (int): The number of features in the input tensor.
-        eps (float): A small value to avoid division by zero during normalization.
-    """
-
-    def __init__(self, features: int, eps: float = 1e-6):
-        super(LayerNorm, self).__init__()
-        self.gamma = Parameter(torch.ones(features))
-        self.beta = Parameter(torch.zeros(features))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len, features)
-
-        Returns:
-            Tensor of the same shape as input with layer normalization applied
-        """
-        mean = x.mean(-1, keepdim=True)
-        std = x.std(-1, keepdim=True)
-        return self.gamma * (x - mean) / (std + self.eps) + self.beta
-
-class MultiHeadAttention(torch.nn.Module):
-
-    """ 
-    Implementation of Multi-Head Attention mechanism as described in the "Attention is All You Need" paper.
-
-    Args:
-        d_model (int): The dimension of the input embeddings.
-        num_heads (int): The number of attention heads.
-        dropout (float): Dropout rate to apply after attention.
-    """
-
-    def __init__(self, d_model: int = 256, num_heads: int = 8, dropout: float = 0.1):
-        super(MultiHeadAttention, self).__init__()
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.d_k = d_model // num_heads
-
-        self.linear_q = Linear(d_model, d_model)
-        self.linear_k = Linear(d_model, d_model)
-        self.linear_v = Linear(d_model, d_model)
-        self.linear_out = Linear(d_model, d_model)
-
-        self.dropout = torch.nn.Dropout(dropout)
-        self.softmax = torch.nn.Softmax(dim=-1)
-
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Args:
-            query: Tensor of shape (batch_size, seq_len, d_model)
-            key: Tensor of shape (batch_size, seq_len, d_model)
-            value: Tensor of shape (batch_size, seq_len, d_model)
-            mask: Optional tensor for masking (batch_size, seq_len, seq_len)
-
-        Returns:
-            Tensor of shape (batch_size, seq_len, d_model) after applying multi-head attention
-        """
-        batch_size = query.size(0)
-
-        ##The reshaping and transposing below enables parallel computation of attention across multiple heads
-
-        q = self.linear_q(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
-        k = self.linear_k(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
-        v = self.linear_v(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
-
-        # Scaled dot-product attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.d_k)
-        if mask is not None:
-            scores = scores.masked_fill(mask, float('-inf'))
-        attn_weights = self.softmax(scores)
-        attn_weights = self.dropout(attn_weights)
-
-        self.last_attn = attn_weights  # Store attention weights for visualization
-
-        attn_output = torch.matmul(attn_weights, v)
-
-        # Concatenate heads and put through final linear layer
-        attn_output = attn_output.transpose(1, 2).reshape(batch_size, -1, self.d_model)
-
-        # Final linear layer
-        output = self.linear_out(attn_output)
-        return output
-
-class ResidualConnection(torch.nn.Module):
-
-    """
-    Implements a residual connection followed by layer normalization.
-    
-    Args:
-        size (int): The number of features in the input tensor.
-        dropout (float): Dropout rate to apply after the residual connection.
-    """
-
-    def __init__(self, size: int, dropout: float = 0.2):
-        super(ResidualConnection, self).__init__()
-        self.layer_norm = LayerNorm(size)
-        self.dropout = torch.nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor, sublayer: torch.nn.Module) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len, features)
-            sublayer: A sublayer module to apply to the input
-
-        Returns:
-            Tensor of the same shape as input after applying residual connection and layer normalization
-        """
-        return x + self.dropout(sublayer(self.layer_norm(x)))
-    
-class FFN(torch.nn.Module):
-
-    """
-    Implements the Position-wise Feed-Forward Network as described in the "Attention is All You Need" paper.
-    
-    Args:
-        d_model (int): The dimension of the input embeddings.
-        d_ff (int): The dimension of the feed-forward layer.
-        dropout (float): Dropout rate to apply after the feed-forward layer.
-    """
-
-    def __init__(self, d_model: int = 256, d_ff: int = 1024, dropout: float = 0.1):
-        super(FFN, self).__init__()
-        self.linear1 = Linear(d_model, d_ff)
-        self.linear2 = Linear(d_ff, d_model)
-        self.dropout = torch.nn.Dropout(dropout)
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len, d_model)
-
-        Returns:
-            Tensor of shape (batch_size, seq_len, d_model) after applying feed-forward network
-        """
-        return self.linear2(self.dropout(self.relu(self.linear1(x))))
-
-class DecoderBlock(torch.nn.Module):
-
-    """    
-    Implementation of a Transformer Decoder Block as described in the "Attention is All You Need" paper.
-    
-    Args:
-        d_model (int): The dimension of the input embeddings.
-        num_heads (int): The number of attention heads.
-        d_ff (int): The dimension of the feed-forward network.
-        dropout (float): Dropout rate to apply in various parts of the block.
-    """
-
-    def __init__(self, d_model: int = 256, num_heads: int = 8, d_ff: int = 512, dropout: float = 0.1):
-        super(DecoderBlock, self).__init__()
-
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
-        self.residual1 = ResidualConnection(d_model, dropout)
-
-        self.feed_forward = torch.nn.Sequential(
-            Linear(d_model, d_ff),
-            torch.nn.ReLU(),
-            Linear(d_ff, d_model)
-        )
-        self.residual2 = ResidualConnection(d_model, dropout)
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len, d_model)
-            mask: Optional tensor for masking (batch_size, seq_len, seq_len)
-
-        Returns:
-            Tensor of shape (batch_size, seq_len, d_model) after applying the decoder block
-        """
-        x = self.residual1(x, lambda x: self.self_attn(x, x, x, mask))
-        x = self.residual2(x, self.feed_forward)
-        return x
-
-class DecoderTransformer(torch.nn.Module):
-
-    """
-    Implementation of a Transformer Decoder as described in the "Attention is All You Need" paper.
-    
-    Args:
-        vocab_size (int): The size of the vocabulary.
-        d_model (int): The dimension of the input embeddings.
-        num_heads (int): The number of attention heads.
-        d_ff (int): The dimension of the feed-forward network.
-        num_layers (int): The number of decoder layers.
-        max_length (int): The maximum length of the input sequences.
-        dropout (float): Dropout rate to apply in various parts of the model.
-        pretrained_embeddings (Embedding): Optional pre-trained embedding layer.
-    """
-
-    def __init__(self, vocab_size: int, d_model: int = 256, num_heads: int = 8, d_ff: int = 512, num_layers: int = 3, max_length: int = 64, dropout: float = 0.1, pretrained_embeddings: Embedding = None):
-        super(DecoderTransformer, self).__init__()
-
-        # Use pretrained embeddings if provided, otherwise create new ones
-        if pretrained_embeddings is not None:
-            self.embedding = pretrained_embeddings
-            # If pretrained embeddings have different dimension, add a projection layer
-            if pretrained_embeddings.embedding_dim != d_model:
-                self.embedding_projection = Linear(pretrained_embeddings.embedding_dim, d_model)
-            else:
-                self.embedding_projection = None
-        else:
-            self.embedding = Embedding(vocab_size, d_model)
-            self.embedding_projection = None
-            
-        self.positional_encoding = PositionalEncoding(d_model, max_length)
-
-        self.layers = torch.nn.ModuleList([
-            DecoderBlock(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)
-        ])
-
-        self.layer_norm = LayerNorm(d_model)
-        self.output_linear = Linear(d_model, vocab_size)
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len)
-            mask: Optional tensor for masking (batch_size, seq_len, seq_len)
-
-        Returns:
-            Tensor of shape (batch_size, seq_len, vocab_size) after applying the decoder transformer
-        """
-
-        batch_size, seq_len = x.size()
-
-        # Create causal mask if not provided
-        if mask is None:
-            # Create mask with shape (1, 1, seq_len, seq_len) for broadcasting
-            mask = torch.triu(torch.ones((1, 1, seq_len, seq_len), device=x.device), diagonal=1).bool()
-
-        x = self.embedding(x)
-        
-        # Project embeddings if dimensions don't match
-        if self.embedding_projection is not None:
-            x = self.embedding_projection(x)
-            
-        x = self.positional_encoding(x)
-
-        for layer in self.layers:
-            x = layer(x, mask)
-
-        x = self.layer_norm(x)
-        output = self.output_linear(x)
-        return output
 
 def create_decoder_transformer(seq_len: int, device: str, pretrained_embeddings: Embedding, num_heads: int = 8, num_layers = 3) -> DecoderTransformer:
 
@@ -570,7 +267,7 @@ def train_decoder_transformer(train_loader, validation_loader, decoder_transform
             target_seq = batch['target_ids'].to(device)  # shape (batch, seq_len)
 
             optimizer.zero_grad()
-            output = decoder_transformer(input_ids)  # (batch, seq_len, vocab_size)
+            output, _ = decoder_transformer(input_ids)  # (batch, seq_len, vocab_size)
 
             # Predictions for BLEU (before flattening)
             predicted_ids = torch.argmax(output, dim=-1)  # (batch, seq_len)
@@ -626,7 +323,7 @@ def train_decoder_transformer(train_loader, validation_loader, decoder_transform
                 input_ids = batch['input_ids'].to(device)
                 target_seq = batch['target_ids'].to(device)
 
-                output = decoder_transformer(input_ids)
+                output, _ = decoder_transformer(input_ids)
                 predicted_ids = torch.argmax(output, dim=-1)
 
                 preds_tokens = _ids_to_token_lists(predicted_ids)
@@ -700,7 +397,7 @@ def train_decoder_transformer(train_loader, validation_loader, decoder_transform
         sample_batch = next(iter(validation_loader))
         input_ids = sample_batch['input_ids'].to(device)
         target_seq = sample_batch['target_ids'].to(device)
-        output = decoder_transformer(input_ids)
+        output, _ = decoder_transformer(input_ids)
         predicted_ids = torch.argmax(output, dim=-1)
 
         # Prepare and log a single sample (first sample in batch)
@@ -753,7 +450,7 @@ def eval_decoder_transformer(test_loader, decoder_transformer):
             input_ids = batch['input_ids'].to(device)
             target_seq = batch['target_ids'].to(device)
 
-            output = decoder_transformer(input_ids)
+            output, _ = decoder_transformer(input_ids)
             predicted_ids = torch.argmax(output, dim=-1)
 
             preds_tokens = _ids_to_token_lists(predicted_ids)
@@ -786,6 +483,329 @@ def eval_decoder_transformer(test_loader, decoder_transformer):
         'test_bleu': test_bleu})
     
     return avg_loss, avg_perplexity_score, test_bleu
+
+def train_with_grad_accm(train_loader, validation_loader, decoder_transformer,
+                         lr=3e-4, weight_decay=0, num_epochs=5,
+                         accumulation_steps: int = 2):
+
+    wandb_dir = "/home/anwesh/scratch/ELL8299 Project/wandb"
+    
+    # Initialize wandb if not already running
+    if wandb.run is None:
+        wandb.init(project="decoder-transformer-grad-accm", dir=wandb_dir, reinit=True)
+        print(f"Started new wandb run with ID: {wandb.run.id}")
+    
+    optimizer = optim.Adam(decoder_transformer.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=tiny_stories_vocab['<pad>'])
+    device = next(decoder_transformer.parameters()).device
+
+    print(f"Starting training with effective batch size: {train_loader.batch_size * accumulation_steps}")
+
+    for epoch in tqdm(range(num_epochs)):
+
+        start_time = time.time()  
+
+        # Training phase
+        decoder_transformer.train()
+        total_train_loss = 0
+
+        train_candidates = []
+        train_references = []
+        
+        # reset gradients at the start of the epoch
+        optimizer.zero_grad()
+        
+        for i, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")):
+            input_ids = batch['input_ids'].to(device)
+            target_seq = batch['target_ids'].to(device)
+
+            # Note: optimizer.zero_grad() is no longer here
+            output, _ = decoder_transformer(input_ids)
+
+            #Calculate bleu predictions for logging
+            predicted_ids = torch.argmax(output, dim=-1)
+            preds_tokens = _ids_to_token_lists(predicted_ids)
+            refs_tokens = _ids_to_token_lists(target_seq)
+            train_candidates.extend(preds_tokens)
+            train_references.extend([[r] for r in refs_tokens])
+
+            output_flat = output.view(-1, output.size(-1))
+            target_flat = target_seq.view(-1)
+            loss = criterion(output_flat, target_flat)
+
+            # Log the unscaled loss
+            total_train_loss += loss.item()
+
+            #gradient accumulation starts here
+            
+            #first i scale the loss
+            loss = loss / accumulation_steps
+            
+            # then backpropagate and accumulate gradients
+            loss.backward()
+            
+            # perform optimizer step every accumulation_steps
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
+                # Clip gradients before stepping
+                torch.nn.utils.clip_grad_norm_(decoder_transformer.parameters(), max_norm=1.0)
+                
+                # Update weights
+                optimizer.step()
+                
+                # Zero gradients for the next accumulation cycle
+                optimizer.zero_grad()
+
+        end_time = time.time()
+        epoch_duration = end_time - start_time
+
+        avg_train_loss = total_train_loss / len(train_loader)
+        train_perplexity = float(np.exp(avg_train_loss))
+
+        # train bleu
+        try:
+            total_examples = len(train_candidates)
+            if total_examples == 0:
+                train_bleu = 0.0
+            else:
+                k = max(1, int(0.1 * total_examples))
+                train_candidates_subset = train_candidates[:k]
+                train_references_subset = train_references[:k]
+                train_bleu = float(bleu_score(train_candidates_subset, train_references_subset))
+        except Exception as e:
+            print(f"Warning: could not compute train BLEU: {e}")
+            train_bleu = 0.0
+        
+        # validation phase
+        decoder_transformer.eval()
+        total_val_loss = 0
+        val_candidates = []
+        val_references = []
+        
+        with torch.no_grad():
+            for batch in tqdm(validation_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]"):
+                input_ids = batch['input_ids'].to(device)
+                target_seq = batch['target_ids'].to(device)
+
+                output, _ = decoder_transformer(input_ids)
+                predicted_ids = torch.argmax(output, dim=-1)
+
+                preds_tokens = _ids_to_token_lists(predicted_ids)
+                refs_tokens = _ids_to_token_lists(target_seq)
+                val_candidates.extend(preds_tokens)
+                val_references.extend([[r] for r in refs_tokens])
+
+                output_flat = output.view(-1, output.size(-1))
+                target_flat = target_seq.view(-1)
+
+                loss = criterion(output_flat, target_flat)
+                total_val_loss += loss.item()
+
+        avg_val_loss = total_val_loss / len(validation_loader)
+        val_perplexity = float(np.exp(avg_val_loss))
+
+        # val BLEU 
+        try:
+            total_examples = len(val_candidates)
+            if total_examples == 0:
+                val_bleu = 0.0
+            else:
+                k = max(1, int(0.1 * total_examples))
+                val_candidates_subset = val_candidates[:k]
+                val_references_subset = val_references[:k]
+                val_bleu = float(bleu_score(val_candidates_subset, val_references_subset))
+        except Exception as e:
+            print(f"Warning: could not compute val BLEU: {e}")
+            val_bleu = 0.0
+        
+
+        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, Train Perplexity: {train_perplexity:.4f}, Train BLEU: {train_bleu:.4f} | Val Loss: {avg_val_loss:.4f}, Val Perplexity: {val_perplexity:.4f}, Val BLEU: {val_bleu:.4f}")
+
+        # logging to wandb
+        wandb.log({
+            'epoch': epoch + 1,
+            'train_loss': avg_train_loss,
+            'val_loss': avg_val_loss,
+            'train_perplexity': train_perplexity,
+            'val_perplexity': val_perplexity,
+            'train_bleu': train_bleu,
+            'val_bleu': val_bleu,
+            'epoch_duration': epoch_duration,
+            'accumulation_steps': accumulation_steps
+        })
+
+        
+        sample_batch = next(iter(validation_loader))
+        input_ids = sample_batch['input_ids'].to(device)
+        target_seq = sample_batch['target_ids'].to(device)
+        output, _ = decoder_transformer(input_ids)
+        predicted_ids = torch.argmax(output, dim=-1)
+
+        input_text = ' '.join([tiny_stories_vocab.get_itos()[idx] for idx in input_ids[0].cpu().numpy() if idx != tiny_stories_vocab['<pad>']])
+        target_text = ' '.join([tiny_stories_vocab.get_itos()[idx] for idx in target_seq[0].cpu().numpy() if idx != tiny_stories_vocab['<pad>']])
+        predicted_text = ' '.join([tiny_stories_vocab.get_itos()[idx] for idx in predicted_ids[0].cpu().numpy() if idx != tiny_stories_vocab['<pad>']])
+
+        print(f"\nSample 1:\nInput: {input_text}\nTarget: {target_text}\nPredicted: {predicted_text}\n")
+
+        wandb.log({
+            'sample/input': input_text,
+            'sample/target': target_text,
+            'sample/predicted': predicted_text})
+    
+    print("Training finished.")
+
+def train_with_checkpointing(train_loader, validation_loader, decoder_transformer,
+                             lr=3e-4, weight_decay=0, num_epochs=10):
+    """
+    Train the model using *manual* gradient checkpointing to save memory.
+    Logs peak memory and epoch duration. Does not save checkpoints.
+    """
+    
+    wandb_dir = "/home/anwesh/scratch/ELL8299 Project/wandb"
+    
+    if wandb.run is None:
+        wandb.init(project="decoder-transformer-checkpointing", dir=wandb_dir, reinit=True)
+        print(f"Started new wandb run with ID: {wandb.run.id}")
+
+    optimizer = optim.Adam(decoder_transformer.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=tiny_stories_vocab['<pad>'])
+    device = next(decoder_transformer.parameters()).device
+    
+    model = decoder_transformer # Use a shorter alias
+
+    print(f"Starting training with *manual gradient checkpointing*.")
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_train_loss = 0
+        
+        #memory tracking: first reset peak memory stats
+        torch.cuda.reset_peak_memory_stats(device) # Reset peak memory counter
+        epoch_start_time = time.time()
+        
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
+            optimizer.zero_grad()
+            
+            input_ids = batch['input_ids'].to(device)
+            target_seq = batch['target_ids'].to(device)
+            target_flat = target_seq.view(-1)
+            batch_size, seq_len = input_ids.size()
+            
+            # --- MANUAL CHECKPOINTING FORWARD PASS ---
+            
+            # 1. Embedding/Positional (Run with graph)
+            #word and pos embeddign are kept in memory for backward pass
+            x = model.embedding(input_ids)
+            if model.embedding_projection:
+                x = model.embedding_projection(x)
+            x = x * torch.sqrt(torch.tensor(model.positional_encoding.d_model, dtype=torch.float32))
+            pos_encoding = model.positional_encoding.pe[:, :seq_len, :]
+            x = x + pos_encoding
+            
+            #input to first block (non-detached)
+            block_inputs = [x] 
+            
+            # keeping a copy as this will be detached in the loop
+            detached_x = x 
+            
+            # Checkpointed Decoder Layers
+            # disconnect from graph but keep the input and enables gradient tracking
+            # We store the detached inputs to each layer in `block_inputs`
+            # so we can re-compute the forward pass during the backward pass
+
+            for layer in model.layers:
+                # Detach the input, making it a leaf node for this tiny graph
+                detached_x = detached_x.detach().requires_grad_()
+                block_inputs.append(detached_x) # Store the detached input
+                
+                # Run the layer. Grads only flow back to `detached_x`
+                detached_x, _ = layer(detached_x, mask=None, past_layer_cache=None)
+            
+            # final Layers (Run with graph)
+            # The graph from `detached_x` (last layer's output) to the loss is kept.
+            x_final = model.layer_norm(detached_x)
+            output = model.output_linear(x_final)
+            output_flat = output.view(-1, output.size(-1))
+            loss = criterion(output_flat, target_flat)
+            total_train_loss += loss.item()
+
+            # --- MANUAL CHECKPOINTING BACKWARD PASS ---
+            
+            # backward on final layers
+            # to compute grad for output_linear, layer_norm,
+            # and populates `detached_x.grad` (the output of the last block)
+            loss.backward()
+            
+            # Get the gradient from the final output
+            current_grad = detached_x.grad.clone()
+            
+            # loop backwards through layers
+            for i in range(len(model.layers) - 1, -1, -1):
+                
+                # Get the *original, non-detached* input tensor
+                # This tensor still has its graph connected to the *previous* block
+                x_in_real = block_inputs[i]
+                
+                # Re-run the forward pass for this block, WITH autograd
+                with torch.enable_grad():
+                    # We pass the *real* input tensor
+                    x_out_recon, _ = model.layers[i](x_in_real, mask=None, past_layer_cache=None)
+                
+                # Manually run the backward pass on this re-computed block
+                # This populates grads for model.layers[i] parameters
+                # and, crucially, populates `x_in_real.grad`
+                x_out_recon.backward(current_grad)
+                
+                # Get the gradient that just flowed to this block's input
+                # and use it for the *next* iteration (the block before this one)
+                current_grad = x_in_real.grad.clone()
+
+            # After the loop, `block_inputs[0].grad` (which is `x.grad`)
+            # is populated. Gradients will now flow from `x` back
+            # through the embedding/positional layers automatically.
+            
+            optimizer.step()
+        
+        # --- End of Batch Loop ---
+        epoch_end_time = time.time()
+        
+        # --- 3. Logging ---
+        epoch_duration = epoch_end_time - epoch_start_time
+        peak_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+        
+        avg_train_loss = total_train_loss / len(train_loader)
+        train_perplexity = float(np.exp(avg_train_loss))
+        
+        # --- 4. Validation (No Checkpointing) ---
+        decoder_transformer.eval()
+        total_val_loss = 0
+        with torch.no_grad():
+            for batch in tqdm(validation_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]"):
+                input_ids = batch['input_ids'].to(device)
+                target_seq = batch['target_ids'].to(device)
+
+                output, _ = decoder_transformer(input_ids)
+                output_flat = output.view(-1, output.size(-1))
+                target_flat = target_seq.view(-1)
+                loss = criterion(output_flat, target_flat)
+                total_val_loss += loss.item()
+        
+        avg_val_loss = total_val_loss / len(validation_loader)
+        val_perplexity = float(np.exp(avg_val_loss))
+
+        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        print(f"Epoch Duration: {epoch_duration:.2f}s | Peak GPU Memory: {peak_memory_mb:.2f} MB")
+
+        wandb.log({
+            'epoch': epoch + 1,
+            'train_loss': avg_train_loss,
+            'val_loss': avg_val_loss,
+            'train_perplexity': train_perplexity,
+            'val_perplexity': val_perplexity,
+            'epoch_duration_sec': epoch_duration,
+            'peak_gpu_memory_mb': peak_memory_mb
+        })
+
+    print("Training finished.")
 
 
 def main():
