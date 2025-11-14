@@ -219,6 +219,8 @@ class MultiHeadAttention(torch.nn.Module):
         attn_weights = self.softmax(scores)
         attn_weights = self.dropout(attn_weights)
 
+        self.last_attn = attn_weights  # Store attention weights for visualization
+
         attn_output = torch.matmul(attn_weights, v)
 
         # Concatenate heads and put through final linear layer
